@@ -49,7 +49,8 @@ export const ExamViewer: React.FC<ExamViewerProps> = ({
       });
 
       if (!response.ok) {
-        throw new Error('Lỗi khi xuất file Word.');
+        const errorText = await response.text();
+        throw new Error(`Lỗi khi xuất file Word (Mã lỗi ${response.status}): ${errorText || response.statusText}`);
       }
 
       const blob = await response.blob();
