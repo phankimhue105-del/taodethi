@@ -81,6 +81,58 @@ async function extractTextFromFile(file: any): Promise<string> {
   return '';
 }
 
+async function selectNewestModel(ai: any): Promise<string> {
+  try {
+    const pager = await ai.models.list();
+    const modelsList: any[] = [];
+    for await (const m of pager) {
+      modelsList.push(m);
+    }
+    
+    // Log the available models
+    console.log('[DEBUG] Available models:', JSON.stringify(modelsList.map(m => ({ name: m.name, methods: m.supportedGenerationMethods })), null, 2));
+
+    const compatibleModels = modelsList.filter(m => {
+      const supportsGenerate = m.supportedGenerationMethods?.includes('generateContent');
+      const isGemini = m.name?.toLowerCase().includes('gemini');
+      return supportsGenerate && isGemini;
+    });
+
+    if (compatibleModels.length === 0) {
+      const allModelNames = modelsList.map(m => m.name || 'unknown').join(', ');
+      throw new Error(`Không tìm thấy model Gemini tương thích nào hỗ trợ generateContent. Các model hiện có: ${allModelNames}`);
+    }
+
+    // Sort by version score descending
+    compatibleModels.sort((a, b) => {
+      const scoreA = getModelVersionScore(a.name || '');
+      const scoreB = getModelVersionScore(b.name || '');
+      return scoreB - scoreA;
+    });
+
+    const chosenModel = compatibleModels[0].name;
+    console.log(`[DEBUG] Selected newest compatible model: ${chosenModel}`);
+    return chosenModel;
+  } catch (err: any) {
+    console.error('[DEBUG] Failed to list or select model:', err);
+    throw err;
+  }
+}
+
+function getModelVersionScore(name: string): number {
+  const cleaned = name.toLowerCase();
+  const match = cleaned.match(/gemini-(\d+(?:\.\d+)?)/);
+  if (!match) return 0;
+  
+  let score = parseFloat(match[1]);
+  if (cleaned.includes('flash-lite')) {
+    score -= 0.05;
+  } else if (cleaned.includes('pro')) {
+    score -= 0.1;
+  }
+  return score;
+}
+
 // API Health Check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -403,34 +455,33 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
     console.log('[DEBUG] contents.parts exists =', !!formattedContents[0]?.parts, 'contents.parts isArray =', Array.isArray(formattedContents[0]?.parts));
     console.log(`[Gemini] Invoking Gemini API for ${subjectName} Grade ${grade}, WebSearch: ${useWebSearch}`);
 
-    let response;
-    const primaryModel = 'gemini-2.5-flash';
-    const fallbackModel = 'gemini-2.5-flash-lite';
+    let chosenModel;
+    try {
+      chosenModel = await selectNewestModel(ai);
+    } catch (modelError: any) {
+      console.error('[API Model Resolution Error] Failed to select dynamic model:', modelError);
+      return res.status(500).json({
+        success: false,
+        error: `Không thể xác định model Gemini khả dụng: ${modelError.message}`,
+        details: modelError.stack || String(modelError),
+      });
+    }
 
-    console.log('[DEBUG] primary model name =', primaryModel);
+    console.log('[DEBUG] Chosen model name =', chosenModel);
+    let response;
     try {
       response = await ai.models.generateContent({
-        model: primaryModel,
+        model: chosenModel,
         contents: formattedContents,
         config,
       });
     } catch (apiError: any) {
-      console.error('[DEBUG] Primary model invocation failed. Error stack:', apiError.stack || apiError);
-      console.log('[DEBUG] fallback model name =', fallbackModel);
-      try {
-        response = await ai.models.generateContent({
-          model: fallbackModel,
-          contents: formattedContents,
-          config,
-        });
-      } catch (fallbackError: any) {
-        console.error('[DEBUG] Fallback model invocation failed. Fatal error stack:', fallbackError.stack || fallbackError);
-        return res.status(500).json({
-          success: false,
-          error: `Lỗi kết nối với Gemini API: Model chính (${primaryModel}) gặp lỗi: ${apiError.message}. Model dự phòng (${fallbackModel}) cũng gặp lỗi: ${fallbackError.message}`,
-          details: `Primary Error: ${apiError.stack || apiError}\n\nFallback Error: ${fallbackError.stack || fallbackError}`,
-        });
-      }
+      console.error('[DEBUG] Model invocation failed. Error stack:', apiError.stack || apiError);
+      return res.status(500).json({
+        success: false,
+        error: `Lỗi kết nối với Gemini API: Model (${chosenModel}) gặp lỗi: ${apiError.message}`,
+        details: apiError.stack || String(apiError),
+      });
     }
 
     // Log response object details
@@ -557,38 +608,35 @@ Hãy trả về duy nhất 1 JSON object biểu diễn câu hỏi đã cập nh�
     console.log('[DEBUG] contents format validation: isArray =', Array.isArray(formattedContents), 'firstElementKeys =', formattedContents[0] ? Object.keys(formattedContents[0]) : 'none');
     console.log('[DEBUG] contents.parts exists =', !!formattedContents[0]?.parts, 'contents.parts isArray =', Array.isArray(formattedContents[0]?.parts));
 
-    let response;
-    const primaryModel = 'gemini-2.5-flash';
-    const fallbackModel = 'gemini-2.5-flash-lite';
+    let chosenModel;
+    try {
+      chosenModel = await selectNewestModel(ai);
+    } catch (modelError: any) {
+      console.error('[API Model Resolution Error] Failed to select dynamic model:', modelError);
+      return res.status(500).json({
+        success: false,
+        error: `Không thể xác định model Gemini khả dụng: ${modelError.message}`,
+        details: modelError.stack || String(modelError),
+      });
+    }
 
-    console.log('[DEBUG] primary model name =', primaryModel);
+    console.log('[DEBUG] Chosen model name =', chosenModel);
+    let response;
     try {
       response = await ai.models.generateContent({
-        model: primaryModel,
+        model: chosenModel,
         contents: formattedContents,
         config: {
           responseMimeType: 'application/json',
         },
       });
     } catch (apiError: any) {
-      console.error('[DEBUG] Primary model invocation failed. Error stack:', apiError.stack || apiError);
-      console.log('[DEBUG] fallback model name =', fallbackModel);
-      try {
-        response = await ai.models.generateContent({
-          model: fallbackModel,
-          contents: formattedContents,
-          config: {
-            responseMimeType: 'application/json',
-          },
-        });
-      } catch (fallbackError: any) {
-        console.error('[DEBUG] Fallback model invocation failed. Fatal error stack:', fallbackError.stack || fallbackError);
-        return res.status(500).json({
-          success: false,
-          error: `Gemini API invocation failed: Primary model (${primaryModel}) failed with: ${apiError.message}. Fallback model (${fallbackModel}) failed with: ${fallbackError.message}`,
-          details: `Primary Error: ${apiError.stack || apiError}\n\nFallback Error: ${fallbackError.stack || fallbackError}`,
-        });
-      }
+      console.error('[DEBUG] Model invocation failed. Error stack:', apiError.stack || apiError);
+      return res.status(500).json({
+        success: false,
+        error: `Gemini API invocation failed: Model (${chosenModel}) failed with: ${apiError.message}`,
+        details: apiError.stack || String(apiError),
+      });
     }
 
     // Log response object details
