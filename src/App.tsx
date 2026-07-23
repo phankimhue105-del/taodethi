@@ -68,6 +68,17 @@ export default function App() {
         body: JSON.stringify(config),
       });
 
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Yêu cầu thất bại (Lỗi ${response.status}): ${errorText || response.statusText}`);
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const text = await response.text();
+        throw new Error(`Phản hồi từ máy chủ không phải JSON: ${text.substring(0, 300)}`);
+      }
+
       const data = await response.json();
 
       if (!data.success || !data.exam) {
