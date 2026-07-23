@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import multer from 'multer';
 import mammoth from 'mammoth';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import {
   Document,
   Packer,
