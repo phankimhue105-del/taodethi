@@ -1,0 +1,6 @@
+{
+  "name": "Hệ Thống Biên Soạn Đề Thi GDPT 2018",
+  "description": "Hệ thống AI tự động hóa quy trình biên soạn đề kiểm tra chuẩn khung Chương trình GDPT 2018 cho Toán, Ngữ văn, Tiếng Anh và KHTN.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
