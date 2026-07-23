@@ -91,6 +91,34 @@ export const ExamViewer: React.FC<ExamViewerProps> = ({
       text += `\n`;
     });
 
+    text += `\n------------------ HẾT ------------------\n\n`;
+
+    // 1. Answer Key
+    text += `ĐÁP ÁN (ANSWER KEY)\n\n`;
+    const groupedBySection: Record<string, typeof exam.questions> = {};
+    exam.questions.forEach((q) => {
+      const section = q.sectionTitle || 'PHẦN ĐÁP ÁN';
+      if (!groupedBySection[section]) groupedBySection[section] = [];
+      groupedBySection[section].push(q);
+    });
+
+    Object.entries(groupedBySection).forEach(([sectionTitle, qs]) => {
+      text += `--- ${sectionTitle} ---\n`;
+      qs.forEach((q) => {
+        text += `Câu ${q.number}: ${q.correctAnswer}\n`;
+      });
+      text += `\n`;
+    });
+
+    // 2. Detailed Answer Explanations
+    text += `HƯỚNG DẪN GIẢI CHI TIẾT (DETAILED EXPLANATIONS)\n\n`;
+    exam.questions.forEach((q) => {
+      text += `Câu ${q.number} (${q.points}đ):\n`;
+      text += `- Nội dung: ${q.content}\n`;
+      text += `- Đáp án đúng: ${q.correctAnswer}\n`;
+      text += `- Giải thích chi tiết:\n${q.explanation}\n\n`;
+    });
+
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
