@@ -21,7 +21,6 @@ import type { GenerateExamRequest, ExamPackage, Question } from './src/types.js'
 const app = express();
 const PORT = 3000;
 
-// Configure body parser and upload middleware
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
@@ -29,37 +28,126 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
 });
 
-// Initialize Gemini SDK lazily
-function getGeminiClient() {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('Chưa cấu hình GEMINI_API_KEY trong hệ thống. Vui lòng kiểm tra Bảng điều khiển Trí tuệ AI.');
+// Lazy global client initialization
+let genAIClient: GoogleGenAI | null = null;
+function getGenAIClient(): GoogleGenAI {
+  if (!genAIClient) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error('Chưa cấu hình GEMINI_API_KEY trong hệ thống. Vui lòng kiểm tra cấu hình.');
+    }
+    genAIClient = new GoogleGenAI({ apiKey });
   }
-  return new GoogleGenAI({
-    apiKey,
-  });
+  return genAIClient;
 }
 
-// Clean JSON response from LLM if wrapped in markdown blocks
-function cleanJsonResponse(rawText: string): any {
+// Stable flagship model selection
+const GEMINI_STABLE_MODEL = 'gemini-2.0-flash';
+
+// Resilient retry engine with exponential backoff
+async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  modelName: string,
+  contents: any,
+  config: any,
+  maxRetries = 3,
+  initialDelayMs = 1000
+): Promise<any> {
+  let attempt = 0;
+  while (true) {
+    try {
+      attempt++;
+      console.log(`[AI Request] Attempt ${attempt} / ${maxRetries} using model: ${modelName}`);
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents,
+        config,
+      });
+      return response;
+    } catch (error: any) {
+      const statusCode = error.status || error.statusCode || (error.message && error.message.includes('429') ? 429 : 500);
+      const isRetryable = [429, 500, 503].includes(statusCode) || 
+                          error.message?.toLowerCase().includes('timeout') || 
+                          error.message?.toLowerCase().includes('deadline');
+      
+      console.error(`[AI Error] Attempt ${attempt} failed (Status: ${statusCode}, Retryable: ${isRetryable}):`, error.message || error);
+      
+      if (attempt >= maxRetries || !isRetryable) {
+        throw error;
+      }
+      
+      const delay = initialDelayMs * Math.pow(2, attempt - 1);
+      console.log(`[AI Retry] Waiting ${delay}ms before next attempt...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
+// Standardized response text reader (function vs string)
+function extractResponseText(response: any): string {
+  if (!response) {
+    throw new Error('Không nhận được phản hồi từ AI (Response object is null/undefined).');
+  }
+  
+  let text = '';
+  if (typeof response.text === 'function') {
+    text = response.text();
+  } else if (typeof response.text === 'string') {
+    text = response.text;
+  } else if (response.candidates?.[0]?.content?.parts?.[0]?.text) {
+    text = response.candidates[0].content.parts[0].text;
+  }
+  
+  const cleanedText = text ? text.trim() : '';
+  if (!cleanedText) {
+    throw new Error('Phản hồi từ AI rỗng (AI returned empty response).');
+  }
+  
+  return cleanedText;
+}
+
+// Safe multi-stage JSON parser
+function safeParseJson(rawText: string): any {
   let cleaned = rawText.trim();
+  
+  // Remove markdown delimiters
   if (cleaned.startsWith('```json')) {
     cleaned = cleaned.replace(/^```json\s*/, '').replace(/\s*```$/, '');
   } else if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```\s*/, '').replace(/\s*```$/, '');
   }
-
-  // Find first { or [ and last } or ]
+  
+  // Extract outermost boundaries if mixed with text
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace !== -1) {
-    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  const firstBracket = cleaned.indexOf('[');
+  const lastBracket = cleaned.lastIndexOf(']');
+  
+  let startIdx = -1;
+  let endIdx = -1;
+  
+  if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+    startIdx = firstBrace;
+    endIdx = lastBrace;
+  } else if (firstBracket !== -1) {
+    startIdx = firstBracket;
+    endIdx = lastBracket;
   }
-
-  return JSON.parse(cleaned);
+  
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    cleaned = cleaned.substring(startIdx, endIdx + 1);
+  }
+  
+  try {
+    return JSON.parse(cleaned);
+  } catch (parseError: any) {
+    console.error('[JSON Parser Error] Raw text:', rawText);
+    console.error('[JSON Parser Error] Extracted text:', cleaned);
+    throw new Error(`Dữ liệu phản hồi không đúng định dạng JSON hợp lệ: ${parseError.message}`);
+  }
 }
 
-// Extract raw text from uploaded file references (e.g. DOCX)
+// Extract raw text from uploaded file references
 async function extractTextFromFile(file: any): Promise<string> {
   if (file.textContent) {
     return file.textContent;
@@ -88,14 +176,17 @@ app.get('/api/health', (req, res) => {
 
 // API Route: Generate Complete Exam
 app.post('/api/generate-exam', async (req, res) => {
-  console.log('[DEBUG] request reaches the route: /api/generate-exam');
-  console.log('[DEBUG] request body validation: data exists =', !!req.body, 'keys =', Object.keys(req.body || {}));
+  console.log('[API] Received generate-exam request');
   try {
-    const ai = getGeminiClient();
+    const ai = getGenAIClient();
     const data: GenerateExamRequest = req.body;
 
     if (!data) {
-      return res.status(400).json({ success: false, error: 'Dữ liệu yêu cầu rỗng.' });
+      return res.status(400).json({
+        success: false,
+        error: 'Dữ liệu yêu cầu rỗng.',
+        details: 'Request body is empty.'
+      });
     }
 
     const {
@@ -116,7 +207,11 @@ app.post('/api/generate-exam', async (req, res) => {
     } = data;
 
     if (!subject || !grade) {
-      return res.status(400).json({ success: false, error: 'Thiếu thông tin Môn học hoặc Khối lớp.' });
+      return res.status(400).json({
+        success: false,
+        error: 'Thiếu thông tin Môn học hoặc Khối lớp.',
+        details: 'Missing subject or grade.'
+      });
     }
 
     const subjectDisplayMap: Record<string, string> = {
@@ -130,7 +225,7 @@ app.post('/api/generate-exam', async (req, res) => {
     };
     const subjectName = subjectDisplayMap[subject] || String(subject).toUpperCase();
 
-    // Safe cognitive levels & structure setup with defaults to prevent nested reading errors
+    // Default configuration objects
     const cogLevels = cognitiveLevels || { remembering: 40, understanding: 30, applying: 20, highApplying: 10 };
     const struct = structure || { multipleChoiceCount: 12, trueFalseCount: 4, shortAnswerCount: 6, essayCount: 2 };
 
@@ -144,7 +239,6 @@ app.post('/api/generate-exam', async (req, res) => {
     const saCount = struct.shortAnswerCount ?? 0;
     const esCount = struct.essayCount ?? 0;
 
-    // System instruction and prompt construction
     const systemPrompt = `Bạn là Chuyên gia Đo lường & Đánh giá Giáo dục hàng đầu Việt Nam, am hiểu sâu sắc Chương trình Giáo dục phổ thông 2018 (GDPT 2018) của Bộ Giáo dục và Đào tạo.
 Nhiệm vụ của bạn là biên soạn một Bộ Đề kiểm tra hoàn chỉnh bao gồm:
 1. Ma trận đề thi chuẩn tỉ lệ (%)
@@ -298,7 +392,6 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
       uploadedFiles.forEach((file, index) => {
         userPromptText += `- File ${index + 1}: ${file.name} (Loại: ${file.category})\n`;
         if (file.textContent) {
-          // Graceful limit check to prevent prompt overflow
           const safeText = file.textContent.substring(0, 4000);
           userPromptText += `  Nội dung trích xuất: "${safeText}"\n`;
         }
@@ -383,15 +476,6 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
       config.responseMimeType = 'application/json';
     }
 
-    // Logging detailed request information
-    console.log('[DEBUG] systemPrompt size =', systemPrompt ? systemPrompt.length : 0);
-    console.log('[DEBUG] userPromptText size =', userPromptText ? userPromptText.length : 0);
-    console.log('[DEBUG] prompt size (systemPrompt + userPromptText) =', (systemPrompt ? systemPrompt.length : 0) + (userPromptText ? userPromptText.length : 0));
-    console.log('[DEBUG] number of parts =', parts.length);
-    parts.forEach((p, idx) => {
-      console.log(`[DEBUG] part ${idx}: type =`, Object.keys(p), 'textLength =', p.text ? p.text.length : 0, 'inlineDataKeys =', p.inlineData ? Object.keys(p.inlineData) : 'none');
-    });
-
     const formattedContents = [
       {
         role: 'user',
@@ -399,70 +483,15 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
       }
     ];
 
-    console.log('[DEBUG] contents format validation: isArray =', Array.isArray(formattedContents), 'firstElementKeys =', formattedContents[0] ? Object.keys(formattedContents[0]) : 'none');
-    console.log('[DEBUG] contents.parts exists =', !!formattedContents[0]?.parts, 'contents.parts isArray =', Array.isArray(formattedContents[0]?.parts));
-    console.log(`[Gemini] Invoking Gemini API for ${subjectName} Grade ${grade}, WebSearch: ${useWebSearch}`);
+    console.log(`[Gemini] Invoking dynamic retry engine for ${subjectName} Grade ${grade}, WebSearch: ${useWebSearch}`);
+    
+    const startTime = Date.now();
+    const response = await generateContentWithRetry(ai, GEMINI_STABLE_MODEL, formattedContents, config);
+    const duration = Date.now() - startTime;
+    console.log(`[Gemini] API Call completed in ${duration}ms`);
 
-    const MODELS = [
-      "gemini-3.6-flash",
-      "gemini-3.5-flash",
-      "gemini-flash-latest"
-    ];
-
-    let response;
-    let lastError: any = null;
-    let chosenModel = "";
-
-    for (const model of MODELS) {
-      try {
-        console.log(`[DEBUG] Attempting generation with model: ${model}`);
-        response = await ai.models.generateContent({
-          model,
-          contents: formattedContents,
-          config,
-        });
-        chosenModel = model;
-        console.log(`[DEBUG] Generation succeeded with model: ${model}`);
-        break;
-      } catch (e: any) {
-        console.warn(`Model ${model} failed:`, e.message || e);
-        lastError = e;
-      }
-    }
-
-    if (!response) {
-      return res.status(500).json({
-        success: false,
-        error: "Không có model Gemini nào khả dụng.",
-        details: lastError?.stack || String(lastError),
-      });
-    }
-
-    // Log response object details
-    console.log('[DEBUG] response object keys =', Object.keys(response || {}));
-    console.log('[DEBUG] typeof response.text =', typeof response.text);
-    console.log('[DEBUG] is response.text a method =', typeof response.text === 'function');
-    if (response) {
-      console.log('[DEBUG] response candidate structure =', JSON.stringify(response.candidates?.[0]?.content || {}, null, 2).substring(0, 500));
-    }
-
-    const responseText = response.text || '';
-    if (!responseText) {
-      throw new Error('AI returned an empty response text.');
-    }
-
-    let examData: ExamPackage;
-    try {
-      examData = cleanJsonResponse(responseText);
-    } catch (parseError: any) {
-      console.error('[JSON Parse Error] Failed to clean and parse response:', parseError);
-      console.error('[JSON Parse Error] Raw text was:', responseText);
-      return res.status(500).json({
-        success: false,
-        error: `Phản hồi từ AI không đúng định dạng JSON cấu trúc yêu cầu.`,
-        details: `Raw output: ${responseText.substring(0, 600)}...`,
-      });
-    }
+    const responseText = extractResponseText(response);
+    const examData: ExamPackage = safeParseJson(responseText);
 
     // Extract grounding sources if available
     try {
@@ -487,7 +516,6 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
     examData.createdAt = new Date().toISOString();
     examData.useWebSearch = useWebSearch;
 
-    console.log('[API] Exam generated successfully');
     res.json({ success: true, exam: examData });
   } catch (error: any) {
     console.error('[API Fatal Error] generate-exam failed:', error.message, error.stack || error);
@@ -501,17 +529,24 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
 
 // API Route: Tweak / Edit a single question in exam
 app.post('/api/edit-question', async (req, res) => {
-  console.log('[DEBUG] request reaches the route: /api/edit-question');
-  console.log('[DEBUG] request body validation: currentQuestion exists =', !!req.body.currentQuestion, 'instruction exists =', !!req.body.instruction);
+  console.log('[API] Received edit-question request');
   try {
-    const ai = getGeminiClient();
+    const ai = getGenAIClient();
     const { currentQuestion, instruction, subjectName, grade } = req.body;
 
     if (!currentQuestion) {
-      return res.status(400).json({ success: false, error: 'Thiếu thông tin câu hỏi hiện tại.' });
+      return res.status(400).json({
+        success: false,
+        error: 'Thiếu thông tin câu hỏi hiện tại.',
+        details: 'Missing currentQuestion payload.'
+      });
     }
     if (!instruction || !instruction.trim()) {
-      return res.status(400).json({ success: false, error: 'Thiếu yêu cầu chỉnh sửa từ giáo viên.' });
+      return res.status(400).json({
+        success: false,
+        error: 'Thiếu yêu cầu chỉnh sửa từ giáo viên.',
+        details: 'Missing instruction prompt.'
+      });
     }
 
     const prompt = `Bạn là Chuyên gia Đo lường & Đánh giá Giáo dục GDPT 2018.
@@ -548,8 +583,6 @@ Hãy trả về duy nhất 1 JSON object biểu diễn câu hỏi đã cập nh�
   "points": ${currentQuestion.points || 0.25}
 }`;
 
-    console.log('[DEBUG] prompt size =', prompt ? prompt.length : 0);
-
     const formattedContents = [
       {
         role: 'user',
@@ -559,73 +592,17 @@ Hãy trả về duy nhất 1 JSON object biểu diễn câu hỏi đã cập nh�
       }
     ];
 
-    console.log('[DEBUG] contents format validation: isArray =', Array.isArray(formattedContents), 'firstElementKeys =', formattedContents[0] ? Object.keys(formattedContents[0]) : 'none');
-    console.log('[DEBUG] contents.parts exists =', !!formattedContents[0]?.parts, 'contents.parts isArray =', Array.isArray(formattedContents[0]?.parts));
+    console.log(`[Gemini] Invoking dynamic retry engine for edit-question`);
+    const startTime = Date.now();
+    const response = await generateContentWithRetry(ai, GEMINI_STABLE_MODEL, formattedContents, {
+      responseMimeType: 'application/json',
+    });
+    const duration = Date.now() - startTime;
+    console.log(`[Gemini] API Call completed in ${duration}ms`);
 
-    const MODELS = [
-      "gemini-3.6-flash",
-      "gemini-3.5-flash",
-      "gemini-flash-latest"
-    ];
+    const responseText = extractResponseText(response);
+    const updatedQuestion: Question = safeParseJson(responseText);
 
-    let response;
-    let lastError: any = null;
-    let chosenModel = "";
-
-    for (const model of MODELS) {
-      try {
-        console.log(`[DEBUG] Attempting edit-question with model: ${model}`);
-        response = await ai.models.generateContent({
-          model,
-          contents: formattedContents,
-          config: {
-            responseMimeType: 'application/json',
-          },
-        });
-        chosenModel = model;
-        console.log(`[DEBUG] Edit-question succeeded with model: ${model}`);
-        break;
-      } catch (e: any) {
-        console.warn(`Model ${model} failed:`, e.message || e);
-        lastError = e;
-      }
-    }
-
-    if (!response) {
-      return res.status(500).json({
-        success: false,
-        error: "Không có model Gemini nào khả dụng.",
-        details: lastError?.stack || String(lastError),
-      });
-    }
-
-    // Log response object details
-    console.log('[DEBUG] response object keys =', Object.keys(response || {}));
-    console.log('[DEBUG] typeof response.text =', typeof response.text);
-    console.log('[DEBUG] is response.text a method =', typeof response.text === 'function');
-    if (response) {
-      console.log('[DEBUG] response candidate structure =', JSON.stringify(response.candidates?.[0]?.content || {}, null, 2).substring(0, 500));
-    }
-
-    const responseText = response.text || '';
-    if (!responseText) {
-      throw new Error('AI returned an empty response text.');
-    }
-
-    let updatedQuestion: Question;
-    try {
-      updatedQuestion = cleanJsonResponse(responseText);
-    } catch (parseError: any) {
-      console.error('[JSON Parse Error] Failed to clean and parse updated question:', parseError);
-      console.error('[JSON Parse Error] Raw text was:', responseText);
-      return res.status(500).json({
-        success: false,
-        error: `Phản hồi từ AI không đúng định dạng JSON câu hỏi.`,
-        details: `Raw output: ${responseText.substring(0, 600)}...`,
-      });
-    }
-
-    console.log('[API] Question updated successfully');
     res.json({ success: true, question: updatedQuestion });
   } catch (error: any) {
     console.error('[API Fatal Error] edit-question failed:', error.message, error.stack || error);
@@ -643,7 +620,11 @@ app.post('/api/export-docx', async (req, res) => {
   try {
     const exam: ExamPackage = req.body.exam;
     if (!exam || !exam.questions) {
-      return res.status(400).json({ success: false, error: 'Dữ liệu đề thi không hợp lệ hoặc bị trống.' });
+      return res.status(400).json({
+        success: false,
+        error: 'Dữ liệu đề thi không hợp lệ hoặc bị trống.',
+        details: 'Invalid or missing exam payload.'
+      });
     }
 
     let doc;
