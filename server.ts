@@ -37,11 +37,6 @@ function getGeminiClient() {
   }
   return new GoogleGenAI({
     apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
   });
 }
 
@@ -93,7 +88,8 @@ app.get('/api/health', (req, res) => {
 
 // API Route: Generate Complete Exam
 app.post('/api/generate-exam', async (req, res) => {
-  console.log('[API] Received generate-exam request');
+  console.log('[DEBUG] request reaches the route: /api/generate-exam');
+  console.log('[DEBUG] request body validation: data exists =', !!req.body, 'keys =', Object.keys(req.body || {}));
   try {
     const ai = getGeminiClient();
     const data: GenerateExamRequest = req.body;
@@ -387,34 +383,62 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
       config.responseMimeType = 'application/json';
     }
 
+    // Logging detailed request information
+    console.log('[DEBUG] systemPrompt size =', systemPrompt ? systemPrompt.length : 0);
+    console.log('[DEBUG] userPromptText size =', userPromptText ? userPromptText.length : 0);
+    console.log('[DEBUG] prompt size (systemPrompt + userPromptText) =', (systemPrompt ? systemPrompt.length : 0) + (userPromptText ? userPromptText.length : 0));
+    console.log('[DEBUG] number of parts =', parts.length);
+    parts.forEach((p, idx) => {
+      console.log(`[DEBUG] part ${idx}: type =`, Object.keys(p), 'textLength =', p.text ? p.text.length : 0, 'inlineDataKeys =', p.inlineData ? Object.keys(p.inlineData) : 'none');
+    });
+
+    const formattedContents = [
+      {
+        role: 'user',
+        parts: parts
+      }
+    ];
+
+    console.log('[DEBUG] contents format validation: isArray =', Array.isArray(formattedContents), 'firstElementKeys =', formattedContents[0] ? Object.keys(formattedContents[0]) : 'none');
+    console.log('[DEBUG] contents.parts exists =', !!formattedContents[0]?.parts, 'contents.parts isArray =', Array.isArray(formattedContents[0]?.parts));
     console.log(`[Gemini] Invoking Gemini API for ${subjectName} Grade ${grade}, WebSearch: ${useWebSearch}`);
 
     let response;
     const primaryModel = 'gemini-2.5-flash';
     const fallbackModel = 'gemini-1.5-flash';
 
+    console.log('[DEBUG] primary model name =', primaryModel);
     try {
       response = await ai.models.generateContent({
         model: primaryModel,
-        contents: parts,
+        contents: formattedContents,
         config,
       });
     } catch (apiError: any) {
-      console.warn(`[Gemini API Warning] Primary model ${primaryModel} failed. Attempting fallback ${fallbackModel}. Error:`, apiError.message);
+      console.error('[DEBUG] Primary model invocation failed. Error stack:', apiError.stack || apiError);
+      console.log('[DEBUG] fallback model name =', fallbackModel);
       try {
         response = await ai.models.generateContent({
           model: fallbackModel,
-          contents: parts,
+          contents: formattedContents,
           config,
         });
       } catch (fallbackError: any) {
-        console.error('[Gemini API Fatal Error] Both primary and fallback models failed:', fallbackError);
+        console.error('[DEBUG] Fallback model invocation failed. Fatal error stack:', fallbackError.stack || fallbackError);
         return res.status(500).json({
           success: false,
           error: `Lỗi kết nối với Gemini API: ${fallbackError.message || fallbackError}`,
           details: fallbackError.stack || String(fallbackError),
         });
       }
+    }
+
+    // Log response object details
+    console.log('[DEBUG] response object keys =', Object.keys(response || {}));
+    console.log('[DEBUG] typeof response.text =', typeof response.text);
+    console.log('[DEBUG] is response.text a method =', typeof response.text === 'function');
+    if (response) {
+      console.log('[DEBUG] response candidate structure =', JSON.stringify(response.candidates?.[0]?.content || {}, null, 2).substring(0, 500));
     }
 
     const responseText = response.text || '';
@@ -472,7 +496,8 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
 
 // API Route: Tweak / Edit a single question in exam
 app.post('/api/edit-question', async (req, res) => {
-  console.log('[API] Received edit-question request');
+  console.log('[DEBUG] request reaches the route: /api/edit-question');
+  console.log('[DEBUG] request body validation: currentQuestion exists =', !!req.body.currentQuestion, 'instruction exists =', !!req.body.instruction);
   try {
     const ai = getGeminiClient();
     const { currentQuestion, instruction, subjectName, grade } = req.body;
@@ -518,36 +543,60 @@ Hãy trả về duy nhất 1 JSON object biểu diễn câu hỏi đã cập nh�
   "points": ${currentQuestion.points || 0.25}
 }`;
 
+    console.log('[DEBUG] prompt size =', prompt ? prompt.length : 0);
+
+    const formattedContents = [
+      {
+        role: 'user',
+        parts: [
+          { text: prompt }
+        ]
+      }
+    ];
+
+    console.log('[DEBUG] contents format validation: isArray =', Array.isArray(formattedContents), 'firstElementKeys =', formattedContents[0] ? Object.keys(formattedContents[0]) : 'none');
+    console.log('[DEBUG] contents.parts exists =', !!formattedContents[0]?.parts, 'contents.parts isArray =', Array.isArray(formattedContents[0]?.parts));
+
     let response;
     const primaryModel = 'gemini-2.5-flash';
     const fallbackModel = 'gemini-1.5-flash';
 
+    console.log('[DEBUG] primary model name =', primaryModel);
     try {
       response = await ai.models.generateContent({
         model: primaryModel,
-        contents: prompt,
+        contents: formattedContents,
         config: {
           responseMimeType: 'application/json',
         },
       });
     } catch (apiError: any) {
-      console.warn(`[Gemini API Warning] edit-question failed on primary model. Trying fallback. Error:`, apiError.message);
+      console.error('[DEBUG] Primary model invocation failed. Error stack:', apiError.stack || apiError);
+      console.log('[DEBUG] fallback model name =', fallbackModel);
       try {
         response = await ai.models.generateContent({
           model: fallbackModel,
-          contents: prompt,
+          contents: formattedContents,
           config: {
             responseMimeType: 'application/json',
           },
         });
       } catch (fallbackError: any) {
-        console.error('[Gemini API Fatal Error] Both models failed for edit-question:', fallbackError);
+        console.error('[DEBUG] Fallback model invocation failed. Fatal error stack:', fallbackError.stack || fallbackError);
         return res.status(500).json({
           success: false,
           error: `Gemini API invocation failed: ${fallbackError.message || fallbackError}`,
           details: fallbackError.stack || String(fallbackError),
         });
       }
+    }
+
+    // Log response object details
+    console.log('[DEBUG] response object keys =', Object.keys(response || {}));
+    console.log('[DEBUG] typeof response.text =', typeof response.text);
+    console.log('[DEBUG] is response.text a method =', typeof response.text === 'function');
+    if (response) {
+      console.log('[DEBUG] response candidate structure =', JSON.stringify(response.candidates?.[0]?.content || {}, null, 2).substring(0, 500));
     }
 
     const responseText = response.text || '';
