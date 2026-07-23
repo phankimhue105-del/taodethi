@@ -62,7 +62,49 @@ export const ExamConfigForm: React.FC<ExamConfigFormProps> = ({ onSubmit, isLoad
   const [useWebSearch, setUseWebSearch] = useState<boolean>(true);
   const [customInstructions, setCustomInstructions] = useState<string>('');
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFileRef[]>([]);
+  const [sampleExamFile, setSampleExamFile] = useState<UploadedFileRef | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
+
+  const handleSampleExamUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    const id = `sample_${Date.now()}`;
+    const reader = new FileReader();
+
+    if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+      reader.onload = (e) => {
+        const text = e.target?.result as string;
+        setSampleExamFile({
+          id,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          mimeType: file.type || 'text/plain',
+          textContent: text,
+          category: 'de_mau',
+        });
+      };
+      reader.readAsText(file);
+    } else {
+      reader.onload = (e) => {
+        const result = e.target?.result as string;
+        setSampleExamFile({
+          id,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          mimeType: file.type || 'application/octet-stream',
+          base64Data: result,
+          category: 'de_mau',
+        });
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleRemoveSampleExam = () => {
+    setSampleExamFile(null);
+  };
 
   // Check sum of cognitive levels
   const totalPercentage =
@@ -166,6 +208,7 @@ export const ExamConfigForm: React.FC<ExamConfigFormProps> = ({ onSubmit, isLoad
       structure,
       useWebSearch,
       uploadedFiles,
+      sampleExamFile,
       customInstructions,
     });
   };
@@ -737,6 +780,71 @@ export const ExamConfigForm: React.FC<ExamConfigFormProps> = ({ onSubmit, isLoad
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Section 6.5: Sample Exam Upload Zone */}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+            <div className="flex items-center gap-2">
+              <UploadCloud className="w-5 h-5 text-indigo-600" />
+              <h2 className="font-bold text-slate-800 text-base">
+                Tải lên Đề thi Mẫu (Học tập phong cách)
+              </h2>
+            </div>
+            <span className="text-xs text-slate-500">Hỗ trợ PDF, DOCX, TXT, PNG, JPG (Tối đa 1 file)</span>
+          </div>
+
+          {!sampleExamFile ? (
+            <div
+              className="p-6 border-2 border-dashed rounded-2xl text-center border-slate-300 hover:border-slate-400 bg-slate-50/50"
+            >
+              <UploadCloud className="w-8 h-8 text-slate-400 mx-auto mb-2" />
+              <p className="text-xs font-semibold text-slate-700">
+                <label className="text-blue-600 hover:underline cursor-pointer">
+                  Chọn đề thi mẫu từ máy tính
+                  <input
+                    type="file"
+                    accept=".pdf,.docx,.doc,.txt,.png,.jpg,.jpeg"
+                    onChange={(e) => handleSampleExamUpload(e.target.files)}
+                    className="hidden"
+                  />
+                </label>
+              </p>
+              <p className="text-[11px] text-slate-400 mt-1">
+                File này dùng để AI học tập phong cách, định dạng và cấu trúc. AI sẽ không sao chép nội dung câu hỏi.
+              </p>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between p-3 bg-slate-100/80 border border-slate-200 rounded-xl text-xs">
+              <div className="flex items-center gap-2.5 truncate max-w-md">
+                <FileText className="w-4 h-4 text-indigo-600 shrink-0" />
+                <span className="font-semibold text-slate-800 truncate">{sampleExamFile.name}</span>
+                <span className="text-slate-400 text-[10px]">
+                  ({(sampleExamFile.size / 1024).toFixed(1)} KB)
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <label className="px-2 py-1 bg-white border border-slate-300 rounded-md text-[11px] font-medium text-slate-700 hover:bg-slate-50 cursor-pointer">
+                  Thay thế
+                  <input
+                    type="file"
+                    accept=".pdf,.docx,.doc,.txt,.png,.jpg,.jpeg"
+                    onChange={(e) => handleSampleExamUpload(e.target.files)}
+                    className="hidden"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleRemoveSampleExam}
+                  className="text-slate-400 hover:text-rose-600 cursor-pointer p-1"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
             </div>
           )}
