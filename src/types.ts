@@ -113,5 +113,6 @@ export interface GenerateExamRequest {
   structure: StructureConfig;
   useWebSearch: boolean;
   uploadedFiles: UploadedFileRef[];
+  sampleExamFile?: UploadedFileRef | null;
   customInstructions?: string;
 }
