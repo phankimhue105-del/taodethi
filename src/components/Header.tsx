@@ -29,8 +29,10 @@ export const Header: React.FC<HeaderProps> = ({
                 GDPT 2018
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-1">
-              Chuẩn Ma trận • Bản đặc tả • Ngữ liệu mở • Đáp án chi tiết
+            <p className="text-xs text-slate-400 mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span>Chuẩn Ma trận • Bản đặc tả • Ngữ liệu mở • Đáp án chi tiết</span>
+              <span className="hidden sm:inline text-slate-600">•</span>
+              <span className="text-indigo-400 font-semibold">Ms Lily - 078.731.3046</span>
             </p>
           </div>
         </div>
