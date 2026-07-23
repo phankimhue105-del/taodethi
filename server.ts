@@ -3,7 +3,6 @@ import path from 'path';
 import multer from 'multer';
 import mammoth from 'mammoth';
 import { GoogleGenAI, Type } from '@google/genai';
-import { createServer as createViteServer } from 'vite';
 import {
   Document,
   Packer,
@@ -94,9 +93,14 @@ app.get('/api/health', (req, res) => {
 
 // API Route: Generate Complete Exam
 app.post('/api/generate-exam', async (req, res) => {
+  console.log('[API] Received generate-exam request');
   try {
     const ai = getGeminiClient();
     const data: GenerateExamRequest = req.body;
+
+    if (!data) {
+      return res.status(400).json({ success: false, error: 'Dữ liệu yêu cầu rỗng.' });
+    }
 
     const {
       subject,
@@ -115,6 +119,10 @@ app.post('/api/generate-exam', async (req, res) => {
       customInstructions,
     } = data;
 
+    if (!subject || !grade) {
+      return res.status(400).json({ success: false, error: 'Thiếu thông tin Môn học hoặc Khối lớp.' });
+    }
+
     const subjectDisplayMap: Record<string, string> = {
       toan: 'TOÁN HỌC',
       van: 'NGỮ VĂN',
@@ -124,7 +132,21 @@ app.post('/api/generate-exam', async (req, res) => {
       hoahoc: 'HÓA HỌC',
       sinhhoc: 'SINH HỌC',
     };
-    const subjectName = subjectDisplayMap[subject] || subject.toUpperCase();
+    const subjectName = subjectDisplayMap[subject] || String(subject).toUpperCase();
+
+    // Safe cognitive levels & structure setup with defaults to prevent nested reading errors
+    const cogLevels = cognitiveLevels || { remembering: 40, understanding: 30, applying: 20, highApplying: 10 };
+    const struct = structure || { multipleChoiceCount: 12, trueFalseCount: 4, shortAnswerCount: 6, essayCount: 2 };
+
+    const rememberPct = cogLevels.remembering ?? 0;
+    const understandPct = cogLevels.understanding ?? 0;
+    const applyPct = cogLevels.applying ?? 0;
+    const highApplyPct = cogLevels.highApplying ?? 0;
+
+    const mcCount = struct.multipleChoiceCount ?? 0;
+    const tfCount = struct.trueFalseCount ?? 0;
+    const saCount = struct.shortAnswerCount ?? 0;
+    const esCount = struct.essayCount ?? 0;
 
     // System instruction and prompt construction
     const systemPrompt = `Bạn là Chuyên gia Đo lường & Đánh giá Giáo dục hàng đầu Việt Nam, am hiểu sâu sắc Chương trình Giáo dục phổ thông 2018 (GDPT 2018) của Bộ Giáo dục và Đào tạo.
@@ -159,18 +181,18 @@ Why the other options are incorrect (nếu là trắc nghiệm nhiều lựa ch�
 (Lưu ý: Thay thế các nhãn A, B, C, D cho phù hợp với các lựa chọn sai thực tế. Với câu hỏi Đúng/Sai, giải thích chi tiết cho từng ý a, b, c, d. Với câu hỏi tự luận hoặc trả lời ngắn, giải thích các bước tính toán/phân tích chi tiết.)
 
 QUY TẮC CẤU TRÚC ĐỀ THI THEO CẤU TRÚC GDPT 2018 MỚI NHẤT:
-- Môn: ${subjectName} - Lớp ${grade} - Thời gian: ${durationMinutes} phút.
+- Môn: ${subjectName} - Lớp ${grade} - Thời gian: ${durationMinutes || 90} phút.
 - Tỉ lệ phân hóa năng lực bắt buộc:
-  + Nhận biết: ${cognitiveLevels.remembering}%
-  + Thông hiểu: ${cognitiveLevels.understanding}%
-  + Vận dụng: ${cognitiveLevels.applying}%
-  + Vận dụng cao: ${cognitiveLevels.highApplying}%
+  + Nhận biết: ${rememberPct}%
+  + Thông hiểu: ${understandPct}%
+  + Vận dụng: ${applyPct}%
+  + Vận dụng cao: ${highApplyPct}%
 
 - Số lượng câu hỏi yêu cầu cho từng phần:
-  1. Phần I (Trắc nghiệm nhiều lựa chọn - A, B, C, D): ${structure.multipleChoiceCount} câu.
-  2. Phần II (Trắc nghiệm Đúng / Sai - Mỗi câu gồm 4 ý a, b, c, d): ${structure.trueFalseCount} câu.
-  3. Phần III (Trắc nghiệm Trả lời ngắn - Nhập số / từ ngắn): ${structure.shortAnswerCount} câu.
-  4. Phần IV (Tự luận / Đọc hiểu viết luận): ${structure.essayCount} câu.
+  1. Phần I (Trắc nghiệm nhiều lựa chọn - A, B, C, D): ${mcCount} câu.
+  2. Phần II (Trắc nghiệm Đúng / Sai - Mỗi câu gồm 4 ý a, b, c, d): ${tfCount} câu.
+  3. Phần III (Trắc nghiệm Trả lời ngắn - Nhập số / từ ngắn): ${saCount} câu.
+  4. Phần IV (Tự luận / Đọc hiểu viết luận): ${esCount} câu.
 
 ĐẶC THÙ CHO TỪNG MÔN HỌC:
 - NGỮ VĂN: Sử dụng NGỮ LIỆU MỞ NGOÀI SÁCH GIÁO KHÓA (không lấy lại bài trong SGK để chống học tủ). Đoạn trích cần ghi rõ tên tác giả, tác phẩm, xuất bản. Phần đọc hiểu gồm các câu hỏi từ Nhận biết đến Vận dụng. Phần Viết gồm nghị luận xã hội hoặc nghị luận văn học.
@@ -184,7 +206,7 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
   "examTitle": "${examTitle || 'ĐỀ KIỂM TRA ĐỊNH KỲ'}",
   "subjectName": "${subjectName}",
   "grade": "${grade}",
-  "durationMinutes": ${durationMinutes},
+  "durationMinutes": ${durationMinutes || 90},
   "examCode": "${examCode || '101'}",
   "generalInstructions": "Thí sinh không được sử dụng tài liệu. Cán bộ coi thi không giải thích gì thêm.",
   "matrix": [
@@ -266,7 +288,6 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
   ]
 }`;
 
-    // Prepare prompt parts (handling uploaded files & web search option)
     const parts: any[] = [];
 
     // Add user instruction prompt
@@ -281,7 +302,9 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
       uploadedFiles.forEach((file, index) => {
         userPromptText += `- File ${index + 1}: ${file.name} (Loại: ${file.category})\n`;
         if (file.textContent) {
-          userPromptText += `  Nội dung trích xuất: "${file.textContent.substring(0, 3000)}"\n`;
+          // Graceful limit check to prevent prompt overflow
+          const safeText = file.textContent.substring(0, 4000);
+          userPromptText += `  Nội dung trích xuất: "${safeText}"\n`;
         }
       });
     }
@@ -290,11 +313,17 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
       userPromptText += `\n[ĐỀ THI MẪU HỌC TẬP PHONG CÁCH]:\n`;
       userPromptText += `- Tên file đề mẫu: ${sampleExamFile.name}\n`;
       if (sampleExamFile.textContent) {
-        userPromptText += `  Nội dung văn bản đề mẫu:\n"""\n${sampleExamFile.textContent}\n"""\n`;
+        const safeText = sampleExamFile.textContent.substring(0, 6000);
+        userPromptText += `  Nội dung văn bản đề mẫu:\n"""\n${safeText}\n"""\n`;
       } else if (sampleExamFile.name.endsWith('.docx') || sampleExamFile.mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-        const text = await extractTextFromFile(sampleExamFile);
-        if (text) {
-          userPromptText += `  Nội dung văn bản đề mẫu (trích xuất từ docx):\n"""\n${text}\n"""\n`;
+        try {
+          const text = await extractTextFromFile(sampleExamFile);
+          if (text) {
+            const safeText = text.substring(0, 6000);
+            userPromptText += `  Nội dung văn bản đề mẫu (trích xuất từ docx):\n"""\n${safeText}\n"""\n`;
+          }
+        } catch (docxErr) {
+          console.error('[Docx Extraction Error] Failed to read sample exam docx:', docxErr);
         }
       }
     }
@@ -309,15 +338,20 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
     if (uploadedFiles && uploadedFiles.length > 0) {
       for (const file of uploadedFiles) {
         if (file.base64Data && file.mimeType) {
-          // Check if image or pdf
-          if (file.mimeType.startsWith('image/') || file.mimeType === 'application/pdf') {
-            const cleanBase64 = file.base64Data.replace(/^data:[^;]+;base64,/, '');
-            parts.push({
-              inlineData: {
-                mimeType: file.mimeType,
-                data: cleanBase64,
-              },
-            });
+          try {
+            if (file.mimeType.startsWith('image/') || file.mimeType === 'application/pdf') {
+              const cleanBase64 = file.base64Data.replace(/^data:[^;]+;base64,/, '');
+              if (cleanBase64.length > 0) {
+                parts.push({
+                  inlineData: {
+                    mimeType: file.mimeType,
+                    data: cleanBase64,
+                  },
+                });
+              }
+            }
+          } catch (fileErr) {
+            console.error('[File Processing Error] Failed to append base64 file:', file.name, fileErr);
           }
         }
       }
@@ -325,20 +359,26 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
 
     // Include base64 images/PDFs of sample exam if uploaded
     if (sampleExamFile && sampleExamFile.base64Data && sampleExamFile.mimeType) {
-      if (sampleExamFile.mimeType.startsWith('image/') || sampleExamFile.mimeType === 'application/pdf') {
-        const cleanBase64 = sampleExamFile.base64Data.replace(/^data:[^;]+;base64,/, '');
-        parts.push({
-          inlineData: {
-            mimeType: sampleExamFile.mimeType,
-            data: cleanBase64,
-          },
-        });
+      try {
+        if (sampleExamFile.mimeType.startsWith('image/') || sampleExamFile.mimeType === 'application/pdf') {
+          const cleanBase64 = sampleExamFile.base64Data.replace(/^data:[^;]+;base64,/, '');
+          if (cleanBase64.length > 0) {
+            parts.push({
+              inlineData: {
+                mimeType: sampleExamFile.mimeType,
+                data: cleanBase64,
+              },
+            });
+          }
+        }
+      } catch (sampleFileErr) {
+        console.error('[Sample File Processing Error] Failed to append sample base64 file:', sampleFileErr);
       }
     }
 
     const config: any = {
       systemInstruction: systemPrompt,
-      temperature: 0.2, // low temperature for structured accuracy
+      temperature: 0.2, 
     };
 
     if (useWebSearch) {
@@ -347,51 +387,102 @@ Hãy trả về kết quả định dạng JSON thuần túy (JSON string) đún
       config.responseMimeType = 'application/json';
     }
 
-    console.log(`[Gemini] Generating exam for ${subjectName} Grade ${grade}, WebSearch: ${useWebSearch}`);
+    console.log(`[Gemini] Invoking Gemini API for ${subjectName} Grade ${grade}, WebSearch: ${useWebSearch}`);
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: parts,
-      config,
-    });
+    let response;
+    const primaryModel = 'gemini-2.5-flash';
+    const fallbackModel = 'gemini-1.5-flash';
+
+    try {
+      response = await ai.models.generateContent({
+        model: primaryModel,
+        contents: parts,
+        config,
+      });
+    } catch (apiError: any) {
+      console.warn(`[Gemini API Warning] Primary model ${primaryModel} failed. Attempting fallback ${fallbackModel}. Error:`, apiError.message);
+      try {
+        response = await ai.models.generateContent({
+          model: fallbackModel,
+          contents: parts,
+          config,
+        });
+      } catch (fallbackError: any) {
+        console.error('[Gemini API Fatal Error] Both primary and fallback models failed:', fallbackError);
+        return res.status(500).json({
+          success: false,
+          error: `Lỗi kết nối với Gemini API: ${fallbackError.message || fallbackError}`,
+          details: fallbackError.stack || String(fallbackError),
+        });
+      }
+    }
 
     const responseText = response.text || '';
-    const examData: ExamPackage = cleanJsonResponse(responseText);
+    if (!responseText) {
+      throw new Error('AI returned an empty response text.');
+    }
+
+    let examData: ExamPackage;
+    try {
+      examData = cleanJsonResponse(responseText);
+    } catch (parseError: any) {
+      console.error('[JSON Parse Error] Failed to clean and parse response:', parseError);
+      console.error('[JSON Parse Error] Raw text was:', responseText);
+      return res.status(500).json({
+        success: false,
+        error: `Phản hồi từ AI không đúng định dạng JSON cấu trúc yêu cầu.`,
+        details: `Raw output: ${responseText.substring(0, 600)}...`,
+      });
+    }
 
     // Extract grounding sources if available
-    const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-    if (groundingChunks && Array.isArray(groundingChunks)) {
-      const sources: { title: string; url: string }[] = [];
-      groundingChunks.forEach((chunk: any) => {
-        if (chunk.web?.uri && chunk.web?.title) {
-          sources.push({
-            title: chunk.web.title,
-            url: chunk.web.uri,
-          });
-        }
-      });
-      examData.groundingSources = sources;
+    try {
+      const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+      if (groundingChunks && Array.isArray(groundingChunks)) {
+        const sources: { title: string; url: string }[] = [];
+        groundingChunks.forEach((chunk: any) => {
+          if (chunk.web?.uri && chunk.web?.title) {
+            sources.push({
+              title: chunk.web.title,
+              url: chunk.web.uri,
+            });
+          }
+        });
+        examData.groundingSources = sources;
+      }
+    } catch (groundingError) {
+      console.warn('[Grounding Warning] Failed to parse grounding sources:', groundingError);
     }
 
     examData.id = `exam_${Date.now()}`;
     examData.createdAt = new Date().toISOString();
     examData.useWebSearch = useWebSearch;
 
+    console.log('[API] Exam generated successfully');
     res.json({ success: true, exam: examData });
   } catch (error: any) {
-    console.error('Error generating exam:', error);
+    console.error('[API Fatal Error] generate-exam failed:', error.message, error.stack || error);
     res.status(500).json({
       success: false,
       error: error.message || 'Lỗi hệ thống khi tạo đề thi với Gemini AI.',
+      details: error.stack || String(error),
     });
   }
 });
 
 // API Route: Tweak / Edit a single question in exam
 app.post('/api/edit-question', async (req, res) => {
+  console.log('[API] Received edit-question request');
   try {
     const ai = getGeminiClient();
     const { currentQuestion, instruction, subjectName, grade } = req.body;
+
+    if (!currentQuestion) {
+      return res.status(400).json({ success: false, error: 'Thiếu thông tin câu hỏi hiện tại.' });
+    }
+    if (!instruction || !instruction.trim()) {
+      return res.status(400).json({ success: false, error: 'Thiếu yêu cầu chỉnh sửa từ giáo viên.' });
+    }
 
     const prompt = `Bạn là Chuyên gia Đo lường & Đánh giá Giáo dục GDPT 2018.
 Hãy chỉnh sửa / làm mới CÂU HỎI sau theo đúng yêu cầu của giáo viên:
@@ -402,15 +493,15 @@ ${JSON.stringify(currentQuestion, null, 2)}
 YÊU CẦU CHỈNH SỬA CỦA GIÁO VIÊN:
 "${instruction}"
 
-Môn: ${subjectName} - Khối lớp: ${grade}.
+Môn: ${subjectName || ''} - Khối lớp: ${grade || ''}.
 
 Hãy trả về duy nhất 1 JSON object biểu diễn câu hỏi đã cập nhật hoàn chỉnh theo định dạng:
 {
-  "id": "${currentQuestion.id}",
-  "number": ${currentQuestion.number},
-  "type": "${currentQuestion.type}",
-  "level": "${currentQuestion.level}",
-  "topic": "${currentQuestion.topic}",
+  "id": "${currentQuestion.id || 'q'}",
+  "number": ${currentQuestion.number || 1},
+  "type": "${currentQuestion.type || 'multiple_choice'}",
+  "level": "${currentQuestion.level || 'Nhận biết'}",
+  "topic": "${currentQuestion.topic || ''}",
   "sectionTitle": "${currentQuestion.sectionTitle || ''}",
   "passageHeader": "${currentQuestion.passageHeader || ''}",
   "readingPassage": "${currentQuestion.readingPassage || ''}",
@@ -424,210 +515,274 @@ Hãy trả về duy nhất 1 JSON object biểu diễn câu hỏi đã cập nh�
   ],
   "correctAnswer": "Phương án đúng / Kết quả",
   "explanation": "Lời giải chi tiết / Hướng dẫn chấm...",
-  "points": ${currentQuestion.points}
+  "points": ${currentQuestion.points || 0.25}
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-      },
-    });
+    let response;
+    const primaryModel = 'gemini-2.5-flash';
+    const fallbackModel = 'gemini-1.5-flash';
 
-    const updatedQuestion: Question = cleanJsonResponse(response.text || '');
+    try {
+      response = await ai.models.generateContent({
+        model: primaryModel,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
+    } catch (apiError: any) {
+      console.warn(`[Gemini API Warning] edit-question failed on primary model. Trying fallback. Error:`, apiError.message);
+      try {
+        response = await ai.models.generateContent({
+          model: fallbackModel,
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+          },
+        });
+      } catch (fallbackError: any) {
+        console.error('[Gemini API Fatal Error] Both models failed for edit-question:', fallbackError);
+        return res.status(500).json({
+          success: false,
+          error: `Gemini API invocation failed: ${fallbackError.message || fallbackError}`,
+          details: fallbackError.stack || String(fallbackError),
+        });
+      }
+    }
+
+    const responseText = response.text || '';
+    if (!responseText) {
+      throw new Error('AI returned an empty response text.');
+    }
+
+    let updatedQuestion: Question;
+    try {
+      updatedQuestion = cleanJsonResponse(responseText);
+    } catch (parseError: any) {
+      console.error('[JSON Parse Error] Failed to clean and parse updated question:', parseError);
+      console.error('[JSON Parse Error] Raw text was:', responseText);
+      return res.status(500).json({
+        success: false,
+        error: `Phản hồi từ AI không đúng định dạng JSON câu hỏi.`,
+        details: `Raw output: ${responseText.substring(0, 600)}...`,
+      });
+    }
+
+    console.log('[API] Question updated successfully');
     res.json({ success: true, question: updatedQuestion });
   } catch (error: any) {
-    console.error('Error editing question:', error);
-    res.status(500).json({ success: false, error: error.message });
+    console.error('[API Fatal Error] edit-question failed:', error.message, error.stack || error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Lỗi hệ thống khi chỉnh sửa câu hỏi với Gemini AI.',
+      details: error.stack || String(error),
+    });
   }
 });
 
 // API Route: Export Exam to Word (.docx)
 app.post('/api/export-docx', async (req, res) => {
+  console.log('[API] Received export-docx request');
   try {
     const exam: ExamPackage = req.body.exam;
+    if (!exam || !exam.questions) {
+      return res.status(400).json({ success: false, error: 'Dữ liệu đề thi không hợp lệ hoặc bị trống.' });
+    }
 
-    const doc = new Document({
-      sections: [
-        {
-          properties: {},
-          children: [
-            // Header Table (School name vs Exam Title)
-            new Table({
-              width: { size: 100, type: WidthType.PERCENTAGE },
-              rows: [
-                new TableRow({
-                  children: [
-                    new TableCell({
-                      width: { size: 45, type: WidthType.PERCENTAGE },
-                      borders: {
-                        top: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-                        bottom: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-                        left: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-                        right: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-                      },
-                      children: [
-                        new Paragraph({
-                          alignment: AlignmentType.CENTER,
-                          children: [
-                            new TextRun({
-                              text: (exam.departmentName || 'SỞ GIÁO DỤC VÀ ĐÀO TẠO').toUpperCase(),
-                              bold: true,
-                              size: 20,
-                            }),
-                          ],
-                        }),
-                        new Paragraph({
-                          alignment: AlignmentType.CENTER,
-                          children: [
-                            new TextRun({
-                              text: (exam.schoolName || 'TRƯỜNG THPT / THCS').toUpperCase(),
-                              bold: true,
-                              size: 22,
-                            }),
-                          ],
-                        }),
-                        new Paragraph({
-                          alignment: AlignmentType.CENTER,
-                          children: [
-                            new TextRun({
-                              text: '--------------------',
-                              size: 18,
-                            }),
-                          ],
-                        }),
-                      ],
-                    }),
-                    new TableCell({
-                      width: { size: 55, type: WidthType.PERCENTAGE },
-                      borders: {
-                        top: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-                        bottom: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-                        left: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-                        right: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-                      },
-                      children: [
-                        new Paragraph({
-                          alignment: AlignmentType.CENTER,
-                          children: [
-                            new TextRun({
-                              text: (exam.examTitle || 'ĐỀ KIỂM TRA ĐỊNH KỲ').toUpperCase(),
-                              bold: true,
-                              size: 22,
-                            }),
-                          ],
-                        }),
-                        new Paragraph({
-                          alignment: AlignmentType.CENTER,
-                          children: [
-                            new TextRun({
-                              text: `MÔN: ${exam.subjectName.toUpperCase()} - LỚP ${exam.grade}`,
-                              bold: true,
-                              size: 20,
-                            }),
-                          ],
-                        }),
-                        new Paragraph({
-                          alignment: AlignmentType.CENTER,
-                          children: [
-                            new TextRun({
-                              text: `Thời gian làm bài: ${exam.durationMinutes} phút (Không kể thời gian phát đề)`,
-                              italics: true,
-                              size: 18,
-                            }),
-                          ],
-                        }),
-                        new Paragraph({
-                          alignment: AlignmentType.CENTER,
-                          children: [
-                            new TextRun({
-                              text: `Mã đề thi: ${exam.examCode || '101'}`,
-                              bold: true,
-                              size: 18,
-                            }),
-                          ],
-                        }),
-                      ],
-                    }),
-                  ],
-                }),
-              ],
-            }),
+    let doc;
+    try {
+      doc = new Document({
+        sections: [
+          {
+            properties: {},
+            children: [
+              // Header Table (School name vs Exam Title)
+              new Table({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                rows: [
+                  new TableRow({
+                    children: [
+                      new TableCell({
+                        width: { size: 45, type: WidthType.PERCENTAGE },
+                        borders: {
+                          top: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+                          bottom: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+                          left: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+                          right: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+                        },
+                        children: [
+                          new Paragraph({
+                            alignment: AlignmentType.CENTER,
+                            children: [
+                              new TextRun({
+                                text: (exam.departmentName || 'SỞ GIÁO DỤC VÀ ĐÀO TẠO').toUpperCase(),
+                                bold: true,
+                                size: 20,
+                              }),
+                            ],
+                          }),
+                          new Paragraph({
+                            alignment: AlignmentType.CENTER,
+                            children: [
+                              new TextRun({
+                                text: (exam.schoolName || 'TRƯỜNG THPT / THCS').toUpperCase(),
+                                bold: true,
+                                size: 22,
+                              }),
+                            ],
+                          }),
+                          new Paragraph({
+                            alignment: AlignmentType.CENTER,
+                            children: [
+                              new TextRun({
+                                text: '--------------------',
+                                size: 18,
+                              }),
+                            ],
+                          }),
+                        ],
+                      }),
+                      new TableCell({
+                        width: { size: 55, type: WidthType.PERCENTAGE },
+                        borders: {
+                          top: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+                          bottom: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+                          left: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+                          right: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+                        },
+                        children: [
+                          new Paragraph({
+                            alignment: AlignmentType.CENTER,
+                            children: [
+                              new TextRun({
+                                text: (exam.examTitle || 'ĐỀ KIỂM TRA ĐỊNH KỲ').toUpperCase(),
+                                bold: true,
+                                size: 22,
+                              }),
+                            ],
+                          }),
+                          new Paragraph({
+                            alignment: AlignmentType.CENTER,
+                            children: [
+                              new TextRun({
+                                text: `MÔN: ${(exam.subjectName || '').toUpperCase()} - LỚP ${exam.grade || ''}`,
+                                bold: true,
+                                size: 20,
+                              }),
+                            ],
+                          }),
+                          new Paragraph({
+                            alignment: AlignmentType.CENTER,
+                            children: [
+                              new TextRun({
+                                text: `Thời gian làm bài: ${exam.durationMinutes || 90} phút (Không kể thời gian phát đề)`,
+                                italics: true,
+                                size: 18,
+                              }),
+                            ],
+                          }),
+                          new Paragraph({
+                            alignment: AlignmentType.CENTER,
+                            children: [
+                              new TextRun({
+                                text: `Mã đề thi: ${exam.examCode || '101'}`,
+                                bold: true,
+                                size: 18,
+                              }),
+                            ],
+                          }),
+                        ],
+                      }),
+                    ],
+                  }),
+                ],
+              }),
 
-            new Paragraph({ text: '' }), // Spacer
-            new Paragraph({
-              alignment: AlignmentType.LEFT,
-              children: [
-                new TextRun({
-                  text: `Họ và tên thí sinh: ............................................................................ Số báo danh: .............................`,
-                  italics: true,
-                  size: 20,
-                }),
-              ],
-            }),
-            new Paragraph({ text: '' }),
+              new Paragraph({ text: '' }), // Spacer
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                children: [
+                  new TextRun({
+                    text: `Họ và tên thí sinh: ............................................................................ Số báo danh: .............................`,
+                    italics: true,
+                    size: 20,
+                  }),
+                ],
+              }),
+              new Paragraph({ text: '' }),
 
-            // Questions grouping by sectionTitle
-            ...generateDocxQuestions(exam.questions),
+              // Questions grouping by sectionTitle
+              ...generateDocxQuestions(exam.questions),
 
-            // End of exam note
-            new Paragraph({ text: '' }),
-            new Paragraph({
-              alignment: AlignmentType.CENTER,
-              children: [
-                new TextRun({
-                  text: '------------------ HẾT ------------------',
-                  bold: true,
-                  size: 20,
-                }),
-              ],
-            }),
-            new Paragraph({
-              alignment: AlignmentType.CENTER,
-              children: [
-                new TextRun({
-                  text: (exam.generalInstructions || 'Cán bộ coi thi không giải thích gì thêm.').italics(),
-                  italics: true,
-                  size: 18,
-                }),
-              ],
-            }),
+              // End of exam note
+              new Paragraph({ text: '' }),
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                children: [
+                  new TextRun({
+                    text: '------------------ HẾT ------------------',
+                    bold: true,
+                    size: 20,
+                  }),
+                ],
+              }),
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                children: [
+                  new TextRun({
+                    text: exam.generalInstructions || 'Cán bộ coi thi không giải thích gì thêm.',
+                    italics: true,
+                    size: 18,
+                  }),
+                ],
+              }),
 
-            // Section 2: Answer Key & Grading Scheme Page Break
-            new Paragraph({ text: '', pageBreakBefore: true }),
-            new Paragraph({
-              heading: HeadingLevel.HEADING_1,
-              alignment: AlignmentType.CENTER,
-              children: [
-                new TextRun({
-                  text: `ĐÁP ÁN VÀ HƯỚNG DẪN CHẤM CHI TIẾT - MÔN ${exam.subjectName.toUpperCase()} LỚP ${exam.grade}`,
-                  bold: true,
-                  size: 24,
-                  color: '1E3A8A',
-                }),
-              ],
-            }),
-            new Paragraph({ text: '' }),
+              // Section 2: Answer Key & Grading Scheme Page Break
+              new Paragraph({ text: '', pageBreakBefore: true }),
+              new Paragraph({
+                heading: HeadingLevel.HEADING_1,
+                alignment: AlignmentType.CENTER,
+                children: [
+                  new TextRun({
+                    text: `ĐÁP ÁN VÀ HƯỚNG DẪN CHẤM CHI TIẾT - MÔN ${(exam.subjectName || '').toUpperCase()} LỚP ${exam.grade || ''}`,
+                    bold: true,
+                    size: 24,
+                    color: '1E3A8A',
+                  }),
+                ],
+              }),
+              new Paragraph({ text: '' }),
 
-            // Answer Key Section
-            ...generateDocxAnswerKeyOnly(exam.questions),
+              // Answer Key Section
+              ...generateDocxAnswerKeyOnly(exam.questions),
 
-            new Paragraph({ text: '', pageBreakBefore: true }),
-            // Detailed Explanations Section
-            ...generateDocxDetailedExplanations(exam.questions),
-          ],
-        },
-      ],
-    });
+              new Paragraph({ text: '', pageBreakBefore: true }),
+              // Detailed Explanations Section
+              ...generateDocxDetailedExplanations(exam.questions),
+            ],
+          },
+        ],
+      });
+    } catch (docBuildErr: any) {
+      console.error('[DOCX Build Error] Failed to compile docx structure:', docBuildErr);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi biên soạn cấu trúc file Word.',
+        details: docBuildErr.stack || String(docBuildErr)
+      });
+    }
 
     const buffer = await Packer.toBuffer(doc);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    res.setHeader('Content-Disposition', `attachment; filename=De_Thi_${exam.subject}_Lop${exam.grade}.docx`);
+    res.setHeader('Content-Disposition', `attachment; filename=De_Thi_${exam.subject || 'export'}_Lop${exam.grade || ''}.docx`);
     res.send(buffer);
   } catch (error: any) {
-    console.error('Error generating docx:', error);
-    res.status(500).json({ success: false, error: error.message });
+    console.error('[API Fatal Error] export-docx failed:', error.message, error.stack || error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Lỗi hệ thống khi xuất file Word.',
+      details: error.stack || String(error),
+    });
   }
 });
 
@@ -828,6 +983,7 @@ function generateDocxDetailedExplanations(questions: Question[]): Paragraph[] {
 // Start Server / Vite Middleware
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
